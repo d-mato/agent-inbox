@@ -3,9 +3,16 @@ import { createMcpHandler } from "agents/mcp/server";
 import PostalMime from "postal-mime";
 import { z } from "zod";
 
+const INBOX_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+function unixNow(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
 const inboxSchema = z.object({
   address: z.string(),
   local_part: z.string(),
+  expires_at: z.number(),
 });
 
 const messageSchema = z.object({
@@ -26,22 +33,27 @@ type MessageDetail = z.infer<typeof messageDetailSchema>;
 
 async function createInbox(env: Env): Promise<Inbox> {
   const localPart = crypto.randomUUID().replace(/-/g, "");
+  const createdAt = unixNow();
+  const expiresAt = createdAt + INBOX_TTL_SECONDS;
 
-  await env.DB.prepare("insert into inboxes (local_part) values (?)")
-    .bind(localPart)
+  await env.DB.prepare(
+    "insert into inboxes (local_part, created_at, expires_at) values (?, ?, ?)",
+  )
+    .bind(localPart, createdAt, expiresAt)
     .run();
 
   return {
     address: `${localPart}@${env.INBOX_DOMAIN}`,
     local_part: localPart,
+    expires_at: expiresAt,
   };
 }
 
-async function inboxExists(env: Env, localPart: string): Promise<boolean> {
+async function inboxIsLive(env: Env, localPart: string): Promise<boolean> {
   const inbox = await env.DB.prepare(
-    "select local_part from inboxes where local_part = ?",
+    "select local_part from inboxes where local_part = ? and expires_at > ?",
   )
-    .bind(localPart)
+    .bind(localPart, unixNow())
     .first();
 
   return inbox !== null;
@@ -51,7 +63,7 @@ async function listMessages(
   env: Env,
   localPart: string,
 ): Promise<Message[] | null> {
-  if (!(await inboxExists(env, localPart))) return null;
+  if (!(await inboxIsLive(env, localPart))) return null;
 
   const { results } = await env.DB.prepare(
     "select id, envelope_from, subject, received_at from messages where local_part = ? order by id desc limit 100",
@@ -67,6 +79,8 @@ async function getMessage(
   localPart: string,
   id: number,
 ): Promise<MessageDetail | null> {
+  if (!(await inboxIsLive(env, localPart))) return null;
+
   return await env.DB.prepare(
     "select id, envelope_from, subject, received_at, body_text, body_html from messages where local_part = ? and id = ?",
   )
@@ -81,7 +95,7 @@ function createServer(env: Env) {
     "create_inbox",
     {
       description:
-        "Create a new inbox. Returns the email address to hand out, and the local_part that identifies it in the other tools.",
+        "Create a new inbox. Returns the email address to hand out, the local_part that identifies it in the other tools, and expires_at (unix seconds) after which the inbox stops receiving and reading.",
       outputSchema: inboxSchema,
     },
     async () => {
@@ -183,7 +197,7 @@ export default {
 
     const localPart = to.slice(0, -suffix.length);
 
-    if (!(await inboxExists(env, localPart))) {
+    if (!(await inboxIsLive(env, localPart))) {
       message.setReject("Unknown address");
       return;
     }
@@ -197,7 +211,7 @@ export default {
         localPart,
         message.from,
         parsed?.subject ?? message.headers.get("subject"),
-        Math.floor(Date.now() / 1000),
+        unixNow(),
         parsed?.text ?? null,
         parsed?.html ?? null,
       )
