@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const INBOX_TTL_SECONDS = 7 * 24 * 60 * 60;
+const POLL_INTERVAL_MS = 5000;
 
 function unixNow(): number {
   return Math.floor(Date.now() / 1000);
@@ -62,16 +63,60 @@ export async function inboxIsLive(
 export async function listMessages(
   env: Env,
   localPart: string,
+  sinceId = 0,
 ): Promise<Message[] | null> {
   if (!(await inboxIsLive(env, localPart))) return null;
 
   const { results } = await env.DB.prepare(
-    "select id, envelope_from, subject, received_at from messages where local_part = ? order by id desc limit 100",
+    "select id, envelope_from, subject, received_at from messages where local_part = ? and id > ? order by id desc limit 100",
   )
-    .bind(localPart)
+    .bind(localPart, sinceId)
     .all<Message>();
 
   return results;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+/**
+ * Polls until a message newer than `sinceId` arrives. Returns an empty array
+ * if the deadline passes first, or null if the inbox does not exist.
+ */
+export async function waitForMessages(
+  env: Env,
+  localPart: string,
+  sinceId: number,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<Message[] | null> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (!signal?.aborted) {
+    const messages = await listMessages(env, localPart, sinceId);
+
+    if (messages === null || messages.length > 0) return messages;
+
+    const remaining = deadline - Date.now();
+
+    if (remaining <= 0) return [];
+
+    await sleep(Math.min(POLL_INTERVAL_MS, remaining), signal);
+  }
+
+  return [];
 }
 
 export async function getMessage(

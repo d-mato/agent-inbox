@@ -7,6 +7,7 @@ import {
   getMessage,
   inboxIsLive,
   listMessages,
+  waitForMessages,
 } from "../src/inbox";
 
 const SEVEN_DAYS = 7 * 24 * 60 * 60;
@@ -67,6 +68,75 @@ describe("listMessages", () => {
 
   it("returns null for an unknown inbox", async () => {
     expect(await listMessages(env, "nosuchinbox")).toBeNull();
+  });
+
+  it("skips messages at or before sinceId", async () => {
+    const { local_part } = await createInbox(env);
+    await addMessage(env, local_part, { ...body, subject: "first" });
+    await addMessage(env, local_part, { ...body, subject: "second" });
+    const [newest, oldest] = (await listMessages(env, local_part)) ?? [];
+
+    expect(await listMessages(env, local_part, oldest.id)).toEqual([newest]);
+    expect(await listMessages(env, local_part, newest.id)).toEqual([]);
+  });
+});
+
+describe("waitForMessages", () => {
+  it("returns straight away when the inbox already holds one", async () => {
+    const { local_part } = await createInbox(env);
+    await addMessage(env, local_part, body);
+
+    expect(await waitForMessages(env, local_part, 0, 10_000)).toHaveLength(1);
+  });
+
+  it("returns null for an unknown inbox", async () => {
+    expect(await waitForMessages(env, "nosuchinbox", 0, 10_000)).toBeNull();
+  });
+
+  it("returns empty once the deadline passes", async () => {
+    const { local_part } = await createInbox(env);
+
+    expect(await waitForMessages(env, local_part, 0, 100)).toEqual([]);
+  });
+
+  it("keeps waiting while the only message is at or before sinceId", async () => {
+    const { local_part } = await createInbox(env);
+    await addMessage(env, local_part, body);
+    const [existing] = (await listMessages(env, local_part)) ?? [];
+
+    expect(await waitForMessages(env, local_part, existing.id, 100)).toEqual(
+      [],
+    );
+  });
+
+  it("returns a message that arrives during the wait", async () => {
+    const { local_part } = await createInbox(env);
+    const delivery = new Promise((resolve) => setTimeout(resolve, 50)).then(
+      () => addMessage(env, local_part, { ...body, subject: "late" }),
+    );
+
+    const messages = await waitForMessages(env, local_part, 0, 1_000);
+
+    await delivery;
+    expect(messages?.map((m) => m.subject)).toEqual(["late"]);
+  });
+
+  it("gives up as soon as the caller aborts", async () => {
+    const { local_part } = await createInbox(env);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50);
+    const started = Date.now();
+
+    const messages = await waitForMessages(
+      env,
+      local_part,
+      0,
+      3_000,
+      controller.signal,
+    );
+
+    expect(messages).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 });
 
