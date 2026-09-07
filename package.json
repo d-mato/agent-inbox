@@ -1,0 +1,16 @@
+{
+  "name": "agent-inbox",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "postinstall": "wrangler types",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "check": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "wrangler": "^4.129.0"
+  }
+}
