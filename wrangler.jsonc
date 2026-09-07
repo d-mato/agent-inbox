@@ -3,5 +3,12 @@
   "name": "agent-inbox",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-07",
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agent-inbox",
+      "database_id": "15d0bdfc-0d6f-48f9-8900-9769c11da829"
+    }
+  ]
 }
