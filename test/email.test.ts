@@ -25,13 +25,24 @@ function mime(to: string): string {
   ].join("\r\n");
 }
 
-function incoming(to: string) {
+function incoming(to: string, raw = mime(to), headers = new Headers()) {
   return {
     to,
     from: "sender@example.com",
-    raw: new Response(mime(to)).body as ReadableStream<Uint8Array>,
-    headers: new Headers(),
+    raw: new Response(raw).body as ReadableStream<Uint8Array>,
+    headers,
   };
+}
+
+/** postal-mime throws past 256 levels of MIME nesting. */
+function tooDeeplyNested(): string {
+  let body = "boom\r\n";
+
+  for (let i = 300; i >= 1; i--) {
+    body = `Content-Type: multipart/mixed; boundary="b${i}"\r\n\r\n--b${i}\r\n${body}--b${i}--\r\n`;
+  }
+
+  return `From: Sender <sender@example.com>\r\n${body}`;
 }
 
 describe("deliverEmail", () => {
@@ -48,6 +59,31 @@ describe("deliverEmail", () => {
       subject: "テスト件名",
       body_text: "plain body\n",
       body_html: "<p>html body</p>\n",
+    });
+  });
+
+  it("keeps the raw header subject when the MIME cannot be parsed", async () => {
+    const inbox = await createInbox(env);
+    const encoded = "=?UTF-8?B?44OG44K544OI5Lu25ZCN?=";
+
+    expect(
+      await deliverEmail(
+        env,
+        incoming(
+          inbox.address,
+          tooDeeplyNested(),
+          new Headers({ subject: encoded }),
+        ),
+      ),
+    ).toBe(true);
+
+    const [listed] = (await listMessages(env, inbox.local_part)) ?? [];
+
+    expect(await getMessage(env, inbox.local_part, listed.id)).toMatchObject({
+      envelope_from: "sender@example.com",
+      subject: encoded,
+      body_text: null,
+      body_html: null,
     });
   });
 
