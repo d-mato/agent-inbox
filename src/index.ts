@@ -42,7 +42,11 @@ export default {
         : new Response("Not found", { status: 404 });
     }
 
-    return new Response("ok");
+    if (request.method === "GET" && url.pathname === "/") {
+      return new Response("ok");
+    }
+
+    return new Response("Not found", { status: 404 });
   },
 
   async email(message, env): Promise<void> {

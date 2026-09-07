@@ -89,6 +89,26 @@ describe("GET /inboxes/:local_part/messages/:id", () => {
   });
 });
 
+describe("unmatched requests", () => {
+  it("answers the root", async () => {
+    const response = await call("/");
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("ok");
+  });
+
+  it("404s an unknown path", async () => {
+    expect((await call("/nope")).status).toBe(404);
+  });
+
+  it("404s a known path on the wrong method", async () => {
+    expect((await call("/inboxes")).status).toBe(404);
+    expect((await call("/inboxes/whatever/messages", "DELETE")).status).toBe(
+      404,
+    );
+  });
+});
+
 describe("email", () => {
   it("rejects an email no inbox accepts", async () => {
     const rejected: string[] = [];
