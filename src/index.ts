@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
+import PostalMime from "postal-mime";
 import { z } from "zod";
 
 async function createInbox(env: Env): Promise<string> {
@@ -19,19 +20,38 @@ const messageSchema = z.object({
   received_at: z.number(),
 });
 
-async function listMessages(
-  env: Env,
-  address: string,
-): Promise<z.infer<typeof messageSchema>[]> {
-  const localPart = address.split("@")[0].toLowerCase();
+const messageDetailSchema = messageSchema.extend({
+  body_text: z.string().nullable(),
+  body_html: z.string().nullable(),
+});
 
+type Message = z.infer<typeof messageSchema>;
+type MessageDetail = z.infer<typeof messageDetailSchema>;
+
+function localPartOf(address: string): string {
+  return address.split("@")[0].toLowerCase();
+}
+
+async function listMessages(env: Env, address: string): Promise<Message[]> {
   const { results } = await env.DB.prepare(
     "select id, envelope_from, subject, received_at from messages where local_part = ? order by id desc limit 100",
   )
-    .bind(localPart)
-    .all<z.infer<typeof messageSchema>>();
+    .bind(localPartOf(address))
+    .all<Message>();
 
   return results;
+}
+
+async function getMessage(
+  env: Env,
+  address: string,
+  id: number,
+): Promise<MessageDetail | null> {
+  return await env.DB.prepare(
+    "select id, envelope_from, subject, received_at, body_text, body_html from messages where local_part = ? and id = ?",
+  )
+    .bind(localPartOf(address), id)
+    .first<MessageDetail>();
 }
 
 function createServer(env: Env) {
@@ -56,7 +76,8 @@ function createServer(env: Env) {
   server.registerTool(
     "list_messages",
     {
-      description: "List messages received at an inbox address, newest first.",
+      description:
+        "List messages received at an inbox address, newest first. Bodies are not included; use get_message for one message.",
       inputSchema: z.object({ address: z.string() }),
       outputSchema: z.object({ messages: z.array(messageSchema) }),
     },
@@ -66,6 +87,24 @@ function createServer(env: Env) {
       return {
         content: [{ type: "text", text: JSON.stringify(messages) }],
         structuredContent: { messages },
+      };
+    },
+  );
+
+  server.registerTool(
+    "get_message",
+    {
+      description:
+        "Get one message received at an inbox address, including its body. The id comes from list_messages.",
+      inputSchema: z.object({ address: z.string(), id: z.number() }),
+      outputSchema: z.object({ message: messageDetailSchema.nullable() }),
+    },
+    async ({ address, id }) => {
+      const message = await getMessage(env, address, id);
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(message) }],
+        structuredContent: { message },
       };
     },
   );
@@ -88,10 +127,22 @@ export default {
       );
     }
 
-    const match = url.pathname.match(/^\/inboxes\/([^/]+)\/messages$/);
+    const listMatch = url.pathname.match(/^\/inboxes\/([^/]+)\/messages$/);
 
-    if (request.method === "GET" && match) {
-      return Response.json(await listMessages(env, match[1]));
+    if (request.method === "GET" && listMatch) {
+      return Response.json(await listMessages(env, listMatch[1]));
+    }
+
+    const getMatch = url.pathname.match(
+      /^\/inboxes\/([^/]+)\/messages\/(\d+)$/,
+    );
+
+    if (request.method === "GET" && getMatch) {
+      const message = await getMessage(env, getMatch[1], Number(getMatch[2]));
+
+      return message
+        ? Response.json(message)
+        : new Response("Not found", { status: 404 });
     }
 
     return new Response("ok");
@@ -119,14 +170,18 @@ export default {
       return;
     }
 
+    const parsed = await PostalMime.parse(message.raw).catch(() => null);
+
     await env.DB.prepare(
-      "insert into messages (local_part, envelope_from, subject, received_at) values (?, ?, ?, ?)",
+      "insert into messages (local_part, envelope_from, subject, received_at, body_text, body_html) values (?, ?, ?, ?, ?, ?)",
     )
       .bind(
         localPart,
         message.from,
-        message.headers.get("subject"),
+        parsed?.subject ?? message.headers.get("subject"),
         Math.floor(Date.now() / 1000),
+        parsed?.text ?? null,
+        parsed?.html ?? null,
       )
       .run();
   },
