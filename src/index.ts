@@ -3,15 +3,10 @@ import { createMcpHandler } from "agents/mcp/server";
 import PostalMime from "postal-mime";
 import { z } from "zod";
 
-async function createInbox(env: Env): Promise<string> {
-  const localPart = crypto.randomUUID().replace(/-/g, "");
-
-  await env.DB.prepare("insert into inboxes (local_part) values (?)")
-    .bind(localPart)
-    .run();
-
-  return `${localPart}@${env.INBOX_DOMAIN}`;
-}
+const inboxSchema = z.object({
+  address: z.string(),
+  local_part: z.string(),
+});
 
 const messageSchema = z.object({
   id: z.number(),
@@ -25,18 +20,43 @@ const messageDetailSchema = messageSchema.extend({
   body_html: z.string().nullable(),
 });
 
+type Inbox = z.infer<typeof inboxSchema>;
 type Message = z.infer<typeof messageSchema>;
 type MessageDetail = z.infer<typeof messageDetailSchema>;
 
-function localPartOf(address: string): string {
-  return address.split("@")[0].toLowerCase();
+async function createInbox(env: Env): Promise<Inbox> {
+  const localPart = crypto.randomUUID().replace(/-/g, "");
+
+  await env.DB.prepare("insert into inboxes (local_part) values (?)")
+    .bind(localPart)
+    .run();
+
+  return {
+    address: `${localPart}@${env.INBOX_DOMAIN}`,
+    local_part: localPart,
+  };
 }
 
-async function listMessages(env: Env, address: string): Promise<Message[]> {
+async function inboxExists(env: Env, localPart: string): Promise<boolean> {
+  const inbox = await env.DB.prepare(
+    "select local_part from inboxes where local_part = ?",
+  )
+    .bind(localPart)
+    .first();
+
+  return inbox !== null;
+}
+
+async function listMessages(
+  env: Env,
+  localPart: string,
+): Promise<Message[] | null> {
+  if (!(await inboxExists(env, localPart))) return null;
+
   const { results } = await env.DB.prepare(
     "select id, envelope_from, subject, received_at from messages where local_part = ? order by id desc limit 100",
   )
-    .bind(localPartOf(address))
+    .bind(localPart)
     .all<Message>();
 
   return results;
@@ -44,13 +64,13 @@ async function listMessages(env: Env, address: string): Promise<Message[]> {
 
 async function getMessage(
   env: Env,
-  address: string,
+  localPart: string,
   id: number,
 ): Promise<MessageDetail | null> {
   return await env.DB.prepare(
     "select id, envelope_from, subject, received_at, body_text, body_html from messages where local_part = ? and id = ?",
   )
-    .bind(localPartOf(address), id)
+    .bind(localPart, id)
     .first<MessageDetail>();
 }
 
@@ -60,15 +80,16 @@ function createServer(env: Env) {
   server.registerTool(
     "create_inbox",
     {
-      description: "Create a new inbox and return the email address to use.",
-      outputSchema: z.object({ address: z.string() }),
+      description:
+        "Create a new inbox. Returns the email address to hand out, and the local_part that identifies it in the other tools.",
+      outputSchema: inboxSchema,
     },
     async () => {
-      const address = await createInbox(env);
+      const inbox = await createInbox(env);
 
       return {
-        content: [{ type: "text", text: address }],
-        structuredContent: { address },
+        content: [{ type: "text", text: JSON.stringify(inbox) }],
+        structuredContent: inbox,
       };
     },
   );
@@ -77,12 +98,14 @@ function createServer(env: Env) {
     "list_messages",
     {
       description:
-        "List messages received at an inbox address, newest first. Bodies are not included; use get_message for one message.",
-      inputSchema: z.object({ address: z.string() }),
-      outputSchema: z.object({ messages: z.array(messageSchema) }),
+        "List messages received at an inbox, newest first. Bodies are not included; use get_message for one message. Returns null if no such inbox exists, and an empty array if it exists but has received nothing.",
+      inputSchema: z.object({ local_part: z.string() }),
+      outputSchema: z.object({
+        messages: z.array(messageSchema).nullable(),
+      }),
     },
-    async ({ address }) => {
-      const messages = await listMessages(env, address);
+    async ({ local_part }) => {
+      const messages = await listMessages(env, local_part);
 
       return {
         content: [{ type: "text", text: JSON.stringify(messages) }],
@@ -95,12 +118,12 @@ function createServer(env: Env) {
     "get_message",
     {
       description:
-        "Get one message received at an inbox address, including its body. The id comes from list_messages.",
-      inputSchema: z.object({ address: z.string(), id: z.number() }),
+        "Get one message, including its body. The id comes from list_messages. Returns null if there is no such message.",
+      inputSchema: z.object({ local_part: z.string(), id: z.number() }),
       outputSchema: z.object({ message: messageDetailSchema.nullable() }),
     },
-    async ({ address, id }) => {
-      const message = await getMessage(env, address, id);
+    async ({ local_part, id }) => {
+      const message = await getMessage(env, local_part, id);
 
       return {
         content: [{ type: "text", text: JSON.stringify(message) }],
@@ -121,16 +144,17 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/inboxes") {
-      return Response.json(
-        { address: await createInbox(env) },
-        { status: 201 },
-      );
+      return Response.json(await createInbox(env), { status: 201 });
     }
 
     const listMatch = url.pathname.match(/^\/inboxes\/([^/]+)\/messages$/);
 
     if (request.method === "GET" && listMatch) {
-      return Response.json(await listMessages(env, listMatch[1]));
+      const messages = await listMessages(env, listMatch[1]);
+
+      return messages
+        ? Response.json(messages)
+        : new Response("Not found", { status: 404 });
     }
 
     const getMatch = url.pathname.match(
@@ -159,13 +183,7 @@ export default {
 
     const localPart = to.slice(0, -suffix.length);
 
-    const inbox = await env.DB.prepare(
-      "select local_part from inboxes where local_part = ?",
-    )
-      .bind(localPart)
-      .first();
-
-    if (!inbox) {
+    if (!(await inboxExists(env, localPart))) {
       message.setReject("Unknown address");
       return;
     }
