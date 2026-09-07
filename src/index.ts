@@ -15,6 +15,18 @@ export default {
 			);
 		}
 
+		const match = url.pathname.match(/^\/inboxes\/([^/]+)\/messages$/);
+
+		if (request.method === "GET" && match) {
+			const { results } = await env.DB.prepare(
+				"select id, envelope_from, subject, received_at from messages where local_part = ? order by id desc limit 100",
+			)
+				.bind(match[1].toLowerCase())
+				.all();
+
+			return Response.json(results);
+		}
+
 		return new Response("ok");
 	},
 
