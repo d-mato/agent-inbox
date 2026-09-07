@@ -217,4 +217,10 @@ export default {
       )
       .run();
   },
+
+  async scheduled(_controller, env): Promise<void> {
+    await env.DB.prepare("delete from inboxes where expires_at <= ?")
+      .bind(unixNow())
+      .run();
+  },
 } satisfies ExportedHandler<Env>;
