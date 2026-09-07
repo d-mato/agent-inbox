@@ -1,10 +1,33 @@
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
+		const url = new URL(request.url);
+
+		if (request.method === "POST" && url.pathname === "/inboxes") {
+			const localPart = crypto.randomUUID().replace(/-/g, "");
+
+			await env.DB.prepare("insert into inboxes (local_part) values (?)")
+				.bind(localPart)
+				.run();
+
+			return Response.json(
+				{ address: `${localPart}@${env.INBOX_DOMAIN}` },
+				{ status: 201 },
+			);
+		}
+
 		return new Response("ok");
 	},
 
 	async email(message, env, ctx): Promise<void> {
-		const localPart = message.to.split("@")[0].toLowerCase();
+		const to = message.to.toLowerCase();
+		const suffix = `@${env.INBOX_DOMAIN}`;
+
+		if (!to.endsWith(suffix)) {
+			message.setReject("Unknown address");
+			return;
+		}
+
+		const localPart = to.slice(0, -suffix.length);
 
 		const inbox = await env.DB.prepare(
 			"select local_part from inboxes where local_part = ?",
