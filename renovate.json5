@@ -1,0 +1,31 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+  timezone: "Asia/Tokyo",
+  // Saturday 06:00-08:59 JST. Renovate has no minute granularity, so this is
+  // "ready by 9am" rather than an exact time.
+  schedule: ["* 6-8 * * 6"],
+  updateNotScheduled: false,
+  minimumReleaseAge: "7 days",
+  postUpdateOptions: ["npmDedupe"],
+  // lockFileMaintenance has its own default schedule and does not inherit the
+  // top-level one.
+  lockFileMaintenance: { enabled: true, schedule: ["* 6-8 * * 6"] },
+  packageRules: [
+    {
+      matchManagers: ["github-actions"],
+      automerge: true,
+    },
+    {
+      // @cloudflare/vitest-plugin depends on an exact wrangler version, so
+      // bumping wrangler alone leaves two copies in the lock file.
+      matchPackageNames: ["wrangler", "@cloudflare/**"],
+      groupName: "cloudflare",
+    },
+    {
+      // agents has an exact peer dependency on @modelcontextprotocol/server.
+      matchPackageNames: ["agents", "@modelcontextprotocol/**"],
+      groupName: "agents",
+    },
+  ],
+}
